@@ -85,8 +85,8 @@ fn parent(pid: Pid) -> Result<()> {
     let mut main_loop = move || -> Result<()> {
         loop {
             tracer.next_syscall()?;
-            let regs = tracer.getregs()?;
-            let syscall = unsafe { regs.format_syscall() };
+            let regs = tracer.regs.get_int()?;
+            let syscall = regs.format_syscall_full(&mut tracer.mem);
             eprintln!("SYSCALL:     {}", syscall);
 
             if regs.0.rax == syscall::SYS_FEXEC {
@@ -95,7 +95,7 @@ fn parent(pid: Pid) -> Result<()> {
             }
 
             tracer.next_syscall()?;
-            let regs = tracer.getregs()?;
+            let regs = tracer.regs.get_int()?;
             let ret = regs.return_value();
             eprintln!("SYSCALL RET: {} = {} ({:#X})", syscall, ret, ret);
         }
