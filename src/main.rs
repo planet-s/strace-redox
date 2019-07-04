@@ -6,7 +6,7 @@ use std::{
     os::unix::ffi::OsStrExt
 };
 
-use strace::{Pid, Tracer};
+use strace::{Pid, Tracer, Stop};
 
 fn e<T>(res: syscall::Result<T>) -> Result<T> {
     res.map_err(|err| Error::from_raw_os_error(err.errno))
@@ -84,7 +84,7 @@ fn parent(pid: Pid) -> Result<()> {
 
     let mut main_loop = move || -> Result<()> {
         loop {
-            tracer.next_syscall()?;
+            tracer.next(Stop::SYSCALL)?;
             let regs = tracer.regs.get_int()?;
             let syscall = regs.format_syscall_full(&mut tracer.mem);
             eprintln!("SYSCALL:     {}", syscall);
@@ -94,7 +94,7 @@ fn parent(pid: Pid) -> Result<()> {
                 continue;
             }
 
-            tracer.next_syscall()?;
+            tracer.next(Stop::SYSCALL)?;
             let regs = tracer.regs.get_int()?;
             let ret = regs.return_value();
             eprintln!("SYSCALL RET: {} = {} ({:#X})", syscall, ret, ret);
