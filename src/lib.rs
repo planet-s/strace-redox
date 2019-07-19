@@ -1,10 +1,17 @@
+// Needed because Redox is using an outdated Rust
+#![feature(maybe_uninit)]
+
 use bitflags::bitflags;
 use std::{
     fmt,
     fs::File,
     io::{self, prelude::*, Result, SeekFrom},
+    iter,
+    mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
-    os::unix::io::AsRawFd
+    os::unix::io::AsRawFd,
+    ptr,
+    slice
 };
 
 mod arch;
@@ -66,6 +73,23 @@ impl Deref for FloatRegisters {
 impl DerefMut for FloatRegisters {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+#[repr(u16)]
+#[derive(Clone, Debug)]
+pub enum PtraceEvent {
+    Clone(Pid),
+    Invalid(u16, [u8; mem::size_of::<syscall::PtraceEventContent>()])
+}
+impl PtraceEvent {
+    pub fn new(inner: syscall::PtraceEvent) -> Self {
+        unsafe {
+            match inner.tag {
+                syscall::PTRACE_EVENT_CLONE => PtraceEvent::Clone(inner.data.clone),
+                _ => PtraceEvent::Invalid(inner.tag, mem::transmute(inner.data))
+            }
+        }
     }
 }
 
@@ -149,11 +173,23 @@ impl Tracer {
     }
     /// Set a breakpoint on the next of stop, and wait for the
     /// breakpoint to be reached (unless tracer is
-    /// nonblocking). Returns a reference self to allow a tiny bit of
-    /// chaining.
+    /// nonblocking). Returns a reference to self to allow a tiny bit
+    /// of chaining.
     pub fn next(&mut self, flags: Stop) -> Result<&mut Self> {
-        self.file.write(&[flags.bits()])?;
+        if let Some(handler) = self.next_event(flags)? {
+            handler.ignore()?;
+        }
         Ok(self)
+    }
+    pub fn next_event(&mut self, flags: Stop) -> Result<Option<EventHandler>> {
+        if self.file.write(&[flags.bits()])? != 0 {
+            Ok(None)
+        } else {
+            Ok(Some(EventHandler {
+                inner: self,
+                used: false
+            }))
+        }
     }
     pub fn nonblocking(self) -> Result<NonblockTracer> {
         let old_flags = e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_GETFL, 0))?;
@@ -168,6 +204,96 @@ impl Tracer {
 impl fmt::Debug for Tracer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Tracer(...)")
+    }
+}
+
+#[must_use]
+pub struct EventHandler<'a> {
+    inner: &'a mut Tracer,
+    used: bool
+}
+impl<'a> EventHandler<'a> {
+    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Result<PtraceEvent>> + 'b {
+        let mut buf = [MaybeUninit::<syscall::PtraceEvent>::uninit(); 4];
+        let mut i = 0;
+        let mut len = 0;
+        let trace = &mut *self.inner;
+        iter::from_fn(move || {
+            if i >= len {
+                len = match trace.file.read(unsafe {
+                    slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * mem::size_of::<syscall::PtraceEvent>())
+                }) {
+                    Ok(n) => n / mem::size_of::<syscall::PtraceEvent>(),
+                    Err(err) => return Some(Err(err))
+                };
+                if len == 0 {
+                    return None;
+                }
+                i = 0;
+            }
+            let ret = PtraceEvent::new(unsafe {
+                ptr::read(buf[i].as_mut_ptr())
+            });
+            i += 1;
+            Some(Ok(ret))
+        })
+    }
+    /// Tries to wait for the initial breakpoint to be
+    /// reached. Returns None if it managed, but itself if another
+    /// event interrupted it and has to be handled.
+    pub fn retry(mut self) -> Result<Option<Self>> {
+        // Not using mem::forget in `else` block because of eventual
+        // I/O errors that will drop
+        self.used = true;
+        if self.inner.file.write(&[syscall::PTRACE_WAIT])? == 0 {
+            self.used = false;
+            Ok(Some(self))
+        } else {
+            Ok(None)
+        }
+    }
+    /// Handle events by calling a specified callback until breakpoint
+    /// is reached
+    pub fn from_callback<F, E>(mut self, mut callback: F) -> std::result::Result<(), E>
+    where
+        F: FnMut(PtraceEvent) -> std::result::Result<(), E>,
+        E: From<io::Error>
+    {
+        loop {
+            self.used = true;
+            for event in self.iter() {
+                callback(event?)?;
+            }
+            match self.retry()? {
+                Some(me) => self = me,
+                None => break
+            }
+        }
+        Ok(())
+    }
+    /// Ignore events, just acknowledge them and move on
+    pub fn ignore(self) -> Result<()> {
+        self.from_callback(|_| Ok(()))
+    }
+    /// A way to simply tell the event handler "I know what I'm doing"
+    /// and then proceed to do nothing so you can get the original
+    /// Tracer back. Normally if you try to drop an EventHandler
+    /// without using it, it will panic.
+    ///
+    /// This is safe because there is no Undefined Behavior at all
+    /// involved - BUT, **use with caution**. This whole system is
+    /// here to protect you from forgetting to handle events, which
+    /// *will* block you from calling ptrace functions. Prefer
+    /// `ignore()` which handles events, but ignores them.
+    pub fn do_nothing(mut self) {
+        self.used = true;
+    }
+}
+impl<'a> Drop for EventHandler<'a> {
+    fn drop(&mut self) {
+        if !self.used {
+            panic!("Tracer's EventHandler must be used. See ignore() and do_nothing() for why this is.");
+        }
     }
 }
 
