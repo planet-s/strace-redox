@@ -185,10 +185,7 @@ impl Tracer {
         if self.file.write(&[flags.bits()])? != 0 {
             Ok(None)
         } else {
-            Ok(Some(EventHandler {
-                inner: self,
-                used: false
-            }))
+            Ok(Some(EventHandler { inner: self }))
         }
     }
     pub fn nonblocking(self) -> Result<NonblockTracer> {
@@ -207,10 +204,9 @@ impl fmt::Debug for Tracer {
     }
 }
 
-#[must_use]
+#[must_use = "The tracer may not be finished waiting unless you call `retry` here"]
 pub struct EventHandler<'a> {
-    inner: &'a mut Tracer,
-    used: bool
+    inner: &'a mut Tracer
 }
 impl<'a> EventHandler<'a> {
     pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Result<PtraceEvent>> + 'b {
@@ -241,12 +237,10 @@ impl<'a> EventHandler<'a> {
     /// Tries to wait for the initial breakpoint to be
     /// reached. Returns None if it managed, but itself if another
     /// event interrupted it and has to be handled.
-    pub fn retry(mut self) -> Result<Option<Self>> {
+    pub fn retry(self) -> Result<Option<Self>> {
         // Not using mem::forget in `else` block because of eventual
         // I/O errors that will drop
-        self.used = true;
         if self.inner.file.write(&[syscall::PTRACE_WAIT])? == 0 {
-            self.used = false;
             Ok(Some(self))
         } else {
             Ok(None)
@@ -260,7 +254,6 @@ impl<'a> EventHandler<'a> {
         E: From<io::Error>
     {
         loop {
-            self.used = true;
             for event in self.iter() {
                 callback(event?)?;
             }
@@ -274,26 +267,6 @@ impl<'a> EventHandler<'a> {
     /// Ignore events, just acknowledge them and move on
     pub fn ignore(self) -> Result<()> {
         self.from_callback(|_| Ok(()))
-    }
-    /// A way to simply tell the event handler "I know what I'm doing"
-    /// and then proceed to do nothing so you can get the original
-    /// Tracer back. Normally if you try to drop an EventHandler
-    /// without using it, it will panic.
-    ///
-    /// This is safe because there is no Undefined Behavior at all
-    /// involved - BUT, **use with caution**. This whole system is
-    /// here to protect you from forgetting to handle events, which
-    /// *will* block you from calling ptrace functions. Prefer
-    /// `ignore()` which handles events, but ignores them.
-    pub fn do_nothing(mut self) {
-        self.used = true;
-    }
-}
-impl<'a> Drop for EventHandler<'a> {
-    fn drop(&mut self) {
-        if !self.used {
-            panic!("Tracer's EventHandler must be used. See ignore() and do_nothing() for why this is.");
-        }
     }
 }
 
