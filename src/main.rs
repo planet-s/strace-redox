@@ -105,7 +105,7 @@ fn parent(pid: Pid) -> Result<()> {
             handle(tracer.next_event(Stop::SYSCALL)?)?;
             let regs = tracer.regs.get_int()?;
             let ret = regs.return_value();
-            eprintln!("SYSCALL RET: {} = {} ({:#X})", syscall, ret, ret);
+            eprintln!("SYSCALL RET: {} = {:?} ({:#X})", syscall, syscall::Error::demux(ret), ret);
         }
     };
     match main_loop() {
