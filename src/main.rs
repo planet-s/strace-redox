@@ -3,7 +3,8 @@ use std::{
     ffi::OsString,
     io::{Error, Result},
     mem,
-    os::unix::ffi::OsStrExt
+    os::unix::ffi::OsStrExt,
+    path::PathBuf,
 };
 
 use strace::{EventHandler, Pid, Tracer, Stop};
@@ -13,13 +14,6 @@ fn e<T>(res: syscall::Result<T>) -> Result<T> {
 }
 
 fn main() -> Result<()> {
-    match e(unsafe { syscall::clone(0) })? {
-        0 => child(),
-        pid => parent(pid)
-    }
-}
-
-fn child() -> Result<()> {
     let cmd = match env::args().nth(1) {
         Some(cmd) => cmd,
         None => {
@@ -32,20 +26,26 @@ fn child() -> Result<()> {
     for mut path in env::split_paths(&env::var_os("PATH").unwrap_or(OsString::new())) {
         path.push(&cmd);
         if let Ok(fd) = e(syscall::open(&path.as_os_str().as_bytes(), syscall::O_RDONLY)) {
-            println!("{}", path.display());
-            file = Some(fd);
+            file = Some((path, fd));
             break;
         }
     }
 
-    let file = match file {
-        Some(file) => file,
+    let (path, fd) = match file {
+        Some(inner) => inner,
         None => {
             eprintln!("Could not find that binary in $PATH");
             return Ok(());
         }
     };
 
+    match e(unsafe { syscall::clone(0) })? {
+        0 => child(fd),
+        pid => parent(path, pid)
+    }
+}
+
+fn child(fd: usize) -> Result<()> {
     let mut args = Vec::new();
     for arg in env::args().skip(1) {
         let len = arg.len();
@@ -67,12 +67,14 @@ fn child() -> Result<()> {
     // I'm ready to be traced!
     e(syscall::kill(e(syscall::getpid())?, syscall::SIGSTOP))?;
 
-    e(syscall::fexec(file, &args, &vars))?;
+    e(syscall::fexec(fd, &args, &vars))?;
     unreachable!("fexec can't return Ok(_)")
 }
 
-fn parent(pid: Pid) -> Result<()> {
+fn parent(path: PathBuf, pid: Pid) -> Result<()> {
     let mut status = 0;
+
+    eprintln!("Executing {} (PID {})", path.display(), pid);
 
     // Wait until child is ready to be traced
     e(syscall::waitpid(pid, &mut status, syscall::WUNTRACED))?;
@@ -118,6 +120,9 @@ fn parent(pid: Pid) -> Result<()> {
             e(syscall::waitpid(pid, &mut status, syscall::WNOHANG))?;
             if syscall::wifexited(status) {
                 println!("Process exited with status {}", syscall::wexitstatus(status));
+            }
+            if syscall::wifsignaled(status) {
+                println!("Process signaled with status {}", syscall::wtermsig(status));
             }
             Ok(())
         },
