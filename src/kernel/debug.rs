@@ -163,7 +163,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             d
         ),
         SYS_FRENAME => format!(
-            "frename({}, {:?}",
+            "frename({}, {:?})",
             b,
             ByteStr(raw_slice!(c as *const u8, d)),
         ),
