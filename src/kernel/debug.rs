@@ -1,7 +1,12 @@
 //! Function to print a syscall, lifted from the kernel's
 //! src/syscall/debug.rs
 
-use std::{any::TypeId, ascii, mem};
+use std::{
+    ascii,
+    io::{Error, ErrorKind, Result},
+    mem::{self, MaybeUninit},
+    slice
+};
 
 use crate::Memory;
 use syscall::{
@@ -10,12 +15,12 @@ use syscall::{
     number::*
 };
 
-struct ByteStr<'a>(&'a[u8]);
+struct ByteStr(Vec<u8>);
 
-impl<'a> ::core::fmt::Debug for ByteStr<'a> {
+impl ::core::fmt::Debug for ByteStr {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "\"")?;
-        for i in self.0 {
+        for i in &self.0 {
             for ch in ascii::escape_default(*i) {
                 write!(f, "{}", ch as char)?;
             }
@@ -25,61 +30,64 @@ impl<'a> ::core::fmt::Debug for ByteStr<'a> {
     }
 }
 
-fn raw_slice<T: Copy + 'static>(mem: Option<&mut Memory>, ptr: *const T, len: usize) -> Vec<T> {
-    let mut buf = vec![0; len * mem::size_of::<T>()];
+fn validate_slice<T: Copy + 'static>(mem: Option<&mut Memory>, ptr: *const T, len: usize) -> Result<Vec<T>> {
+    let mut buf = vec![MaybeUninit::<T>::uninit(); len];
 
-    if mem.and_then(|mem| mem.read(ptr as *const u8, &mut buf).ok()).is_none() {
-        const ERROR_STRING: &[u8] = b"error";
+    {
+        // Read raw bytes
+        let mut byte_buf = unsafe {
+            slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, len * mem::size_of::<T>())
+        };
 
-        if TypeId::of::<T>() == TypeId::of::<u8>() && buf.len() >= ERROR_STRING.len() {
-            buf[..ERROR_STRING.len()].copy_from_slice(ERROR_STRING);
-        }
+        let mem = mem.ok_or(Error::new(ErrorKind::InvalidData, "No memory inputted"))?;
+        mem.read(ptr as *const u8, &mut byte_buf)?;
     }
 
-    // FIXME: The capacity after shrink_to_fit may still be more than
-    // the length... Memory leak?
-    buf.shrink_to_fit();
-
-    let raw = buf.as_mut_ptr() as *mut T;
-    let cap = buf.capacity() / mem::size_of::<T>();
-
-    mem::forget(buf);
-
+    // Reinterpret Vec<MaybeUninit<T>> as Vec<T>
+    let (ptr, len, cap) = (buf.as_mut_ptr(), buf.len(), buf.capacity());
+    let ptr = ptr as *mut T;
     unsafe {
-        Vec::from_raw_parts(raw, len, cap)
+        mem::forget(buf);
+        Ok(Vec::<T>::from_raw_parts(ptr, len, cap))
     }
 }
 
 pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) -> String {
-    macro_rules! raw_slice {
+    macro_rules! validate_slice {
         ($ptr:expr, $len:expr) => {
-            &raw_slice!(owned $ptr, $len)
-        };
-        (owned $ptr:expr, $len:expr) => {
-            raw_slice(match mem {
+            validate_slice(match mem {
                 Some(ref mut mem) => Some(&mut *mem),
                 None => None
             }, $ptr, $len)
         };
     }
+    // The below code should preferrably only have the minimal amount
+    // of changes diverging from src/syscall/debug.rs. At any point it
+    // should not be too much effort to reset this to that code, and
+    // patch any *absolutely* necessary changes.
+    //
+    // Things that need fixing:
+    // - s/validate_slice\(_mut\)?(/validate_slice!(/g
+    // - SYS_FEXEC str::from_utf8 -> String::from_utf8
+    // - generally, any references -> owned values
     match a {
         SYS_OPEN => format!(
             "open({:?}, {:#X})",
-            ByteStr(raw_slice!(b as *const u8, c)),
+            validate_slice!(b as *const u8, c).map(ByteStr),
             d
         ),
         SYS_CHMOD => format!(
             "chmod({:?}, {:#o})",
-            ByteStr(raw_slice!(b as *const u8, c)),
+            validate_slice!(b as *const u8, c).map(ByteStr),
             d
         ),
         SYS_RMDIR => format!(
             "rmdir({:?})",
-            ByteStr(raw_slice!(b as *const u8, c))
+            validate_slice!(b as *const u8, c).map(ByteStr)
         ),
         SYS_UNLINK => format!(
             "unlink({:?})",
-            ByteStr(raw_slice!(b as *const u8, c))
+            validate_slice!(b as *const u8, c).map(ByteStr)
         ),
         SYS_CLOSE => format!(
             "close({})", b
@@ -87,13 +95,13 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_DUP => format!(
             "dup({}, {:?})",
             b,
-            ByteStr(raw_slice!(c as *const u8, d))
+            validate_slice!(c as *const u8, d).map(ByteStr)
         ),
         SYS_DUP2 => format!(
             "dup2({}, {}, {:?})",
             b,
             c,
-            ByteStr(raw_slice!(d as *const u8, e))
+            validate_slice!(d as *const u8, e).map(ByteStr)
         ),
         SYS_READ => format!(
             "read({}, {:#X}, {})",
@@ -147,7 +155,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_FMAP => format!(
             "fmap({}, {:?})",
             b,
-            raw_slice!(
+            validate_slice!(
                 c as *const Map,
                 d/mem::size_of::<Map>()
             ),
@@ -165,12 +173,12 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_FRENAME => format!(
             "frename({}, {:?})",
             b,
-            ByteStr(raw_slice!(c as *const u8, d)),
+            validate_slice!(c as *const u8, d).map(ByteStr),
         ),
         SYS_FSTAT => format!(
             "fstat({}, {:?})",
             b,
-            raw_slice!(
+            validate_slice!(
                 c as *const Stat,
                 d/mem::size_of::<Stat>()
             ),
@@ -193,7 +201,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_FUTIMENS => format!(
             "futimens({}, {:?})",
             b,
-            raw_slice!(
+            validate_slice!(
                 c as *const TimeSpec,
                 d/mem::size_of::<TimeSpec>()
             ),
@@ -205,12 +213,12 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         ),
         SYS_CHDIR => format!(
             "chdir({:?})",
-            ByteStr(raw_slice!(b as *const u8, c))
+            validate_slice!(b as *const u8, c).map(ByteStr)
         ),
         SYS_CLOCK_GETTIME => format!(
             "clock_gettime({}, {:?})",
             b,
-            raw_slice!(c as *const TimeSpec, 1)
+            validate_slice!(c as *const TimeSpec, 1)
         ),
         SYS_CLONE => format!(
             "clone({})",
@@ -224,17 +232,29 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_FEXEC => format!(
             "fexec({}, {:?}, {:?})",
             b,
-            raw_slice!(c as *const [usize; 2], d).iter()
-                .map(|a| String::from_utf8(raw_slice!(owned a[0] as *const u8, a[1])).ok())
-                .collect::<Vec<Option<String>>>(),
-            raw_slice!(e as *const [usize; 2], f).iter()
-                .map(|a| String::from_utf8(raw_slice!(owned a[0] as *const u8, a[1])).ok())
-                .collect::<Vec<Option<String>>>()
+            validate_slice!(
+                c as *const [usize; 2],
+                d
+            ).map(|slice| {
+                slice.iter().map(|a|
+                    validate_slice!(a[0] as *const u8, a[1]).ok()
+                    .and_then(|s| String::from_utf8(s).ok())
+                ).collect::<Vec<Option<String>>>()
+            }),
+            validate_slice!(
+                e as *const [usize; 2],
+                f
+            ).map(|slice| {
+                slice.iter().map(|a|
+                    validate_slice!(a[0] as *const u8, a[1]).ok()
+                    .and_then(|s| String::from_utf8(s).ok())
+                ).collect::<Vec<Option<String>>>()
+            })
         ),
         SYS_FUTEX => format!(
             "futex({:#X} [{:?}], {}, {}, {}, {})",
             b,
-            raw_slice!(b as *const i32, 1)[0],
+            validate_slice!(b as *const i32, 1).map(|uaddr| uaddr[0]),
             c,
             d,
             e,
@@ -274,12 +294,12 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_SIGPROCMASK => format!(
             "sigprocmask({}, {:?}, {:?})",
             b,
-            raw_slice!(c as *const [u64; 2], 1),
-            raw_slice!(d as *const [u64; 2], 1)
+            validate_slice!(c as *const [u64; 2], 1),
+            validate_slice!(d as *const [u64; 2], 1)
         ),
         SYS_MKNS => format!(
             "mkns({:?})",
-            raw_slice!(b as *const [usize; 2], c)
+            validate_slice!(b as *const [usize; 2], c)
         ),
         SYS_MPROTECT => format!(
             "mprotect({:#X}, {}, {:#X})",
@@ -289,7 +309,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         ),
         SYS_NANOSLEEP => format!(
             "nanosleep({:?}, ({}, {}))",
-            raw_slice!(b as *const TimeSpec, 1),
+            validate_slice!(b as *const TimeSpec, 1),
             c,
             d
         ),
@@ -318,12 +338,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         ),
         SYS_PIPE2 => format!(
             "pipe2({:?}, {})",
-            raw_slice!(b as *const usize, 2),
-            c
-        ),
-        SYS_SETPGID => format!(
-            "setpgid({}, {})",
-            b,
+            validate_slice!(b as *const usize, 2),
             c
         ),
         SYS_SETREGID => format!(

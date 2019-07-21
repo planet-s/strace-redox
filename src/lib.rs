@@ -140,12 +140,12 @@ impl Memory {
     }
     pub fn read(&mut self, from: *const u8, to: &mut [u8]) -> Result<()> {
         self.file.seek(SeekFrom::Start(from as u64))?;
-        self.file.read(to)?;
+        self.file.read_exact(to)?;
         Ok(())
     }
     pub fn write(&mut self, from: &[u8], to: *const u8) -> Result<()> {
         self.file.seek(SeekFrom::Start(to as u64))?;
-        self.file.write(from)?;
+        self.file.write_all(from)?;
         Ok(())
     }
     pub fn cursor(&mut self) -> Result<u64> {
