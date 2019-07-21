@@ -119,6 +119,17 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             },
             d
         ),
+        SYS_FCHMOD => format!(
+            "fchmod({}, {:#o})",
+            b,
+            c
+        ),
+        SYS_FCHOWN => format!(
+            "fchown({}, {}, {})",
+            b,
+            c,
+            d
+        ),
         SYS_FCNTL => format!(
             "fcntl({}, {} ({}), {:#X})",
             b,
@@ -151,6 +162,11 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             c,
             d
         ),
+        SYS_FRENAME => format!(
+            "frename({}, {:?}",
+            b,
+            ByteStr(raw_slice!(c as *const u8, d)),
+        ),
         SYS_FSTAT => format!(
             "fstat({}, {:?})",
             b,
@@ -173,6 +189,14 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             "ftruncate({}, {})",
             b,
             c
+        ),
+        SYS_FUTIMENS => format!(
+            "futimens({}, {:?})",
+            b,
+            raw_slice!(
+                c as *const TimeSpec,
+                d/mem::size_of::<TimeSpec>()
+            ),
         ),
 
         SYS_BRK => format!(
@@ -226,7 +250,9 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_GETEUID => format!("geteuid()"),
         SYS_GETGID => format!("getgid()"),
         SYS_GETNS => format!("getns()"),
+        SYS_GETPGID => format!("getpgid()"),
         SYS_GETPID => format!("getpid()"),
+        SYS_GETPPID => format!("getppid()"),
         SYS_GETUID => format!("getuid()"),
         SYS_IOPL => format!(
             "iopl({})",
@@ -293,6 +319,11 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_PIPE2 => format!(
             "pipe2({:?}, {})",
             raw_slice!(b as *const usize, 2),
+            c
+        ),
+        SYS_SETPGID => format!(
+            "setpgid({}, {})",
+            b,
             c
         ),
         SYS_SETREGID => format!(
