@@ -23,12 +23,19 @@ fn e<T>(res: syscall::Result<T>) -> Result<T> {
 }
 
 bitflags! {
-    pub struct Stop: u8 {
-        const COMPLETION = syscall::PTRACE_CONT;
-        const INSTRUCTION = syscall::PTRACE_SINGLESTEP;
-        const SIGNAL = syscall::PTRACE_SIGNAL;
-        const SYSCALL = syscall::PTRACE_SYSCALL;
-        const SYSEMU = syscall::PTRACE_SYSEMU;
+    pub struct Flags: u64 {
+        const STOP_PRE_SYSCALL = syscall::PTRACE_STOP_PRE_SYSCALL;
+        const STOP_POST_SYSCALL = syscall::PTRACE_STOP_POST_SYSCALL;
+        const STOP_SINGLESTEP = syscall::PTRACE_STOP_SINGLESTEP;
+        const STOP_SIGNAL = syscall::PTRACE_STOP_SIGNAL;
+        const STOP_ALL = Self::STOP_PRE_SYSCALL.bits | Self::STOP_POST_SYSCALL.bits | Self::STOP_SINGLESTEP.bits | Self::STOP_SIGNAL.bits;
+
+        const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE;
+        const EVENT_ALL = Self::EVENT_CLONE.bits;
+
+        const FLAG_SYSEMU = syscall::PTRACE_FLAG_SYSEMU;
+        const FLAG_WAIT = syscall::PTRACE_FLAG_WAIT;
+        const FLAG_ALL = Self::FLAG_SYSEMU.bits | Self::FLAG_WAIT.bits;
     }
 }
 
@@ -77,20 +84,26 @@ impl DerefMut for FloatRegisters {
     }
 }
 
-#[repr(u16)]
-#[derive(Clone, Debug)]
-pub enum PtraceEvent {
-    Clone(Pid),
-    Signal(usize),
-    Invalid(u16, [u8; mem::size_of::<syscall::PtraceEventData>()])
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EventData {
+    EventClone(usize),
+    StopSignal(usize, usize),
+    Unknown(usize, usize, usize, usize, usize, usize),
 }
-impl PtraceEvent {
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Event {
+    pub cause: Flags,
+    pub data: EventData
+}
+impl Event {
     pub fn new(inner: syscall::PtraceEvent) -> Self {
-        unsafe {
-            match inner.tag {
-                syscall::PTRACE_EVENT_CLONE => PtraceEvent::Clone(inner.data.clone),
-                syscall::PTRACE_EVENT_SIGNAL => PtraceEvent::Signal(inner.data.signal),
-                _ => PtraceEvent::Invalid(inner.tag, mem::transmute(inner.data))
+        Self {
+            cause: Flags::from_bits_truncate(inner.cause),
+            data: match inner.cause {
+                syscall::PTRACE_EVENT_CLONE => EventData::EventClone(inner.a),
+                syscall::PTRACE_STOP_SIGNAL => EventData::StopSignal(inner.a, inner.b),
+                _ => EventData::Unknown(inner.a, inner.b, inner.c, inner.d, inner.e, inner.f),
             }
         }
     }
@@ -175,34 +188,25 @@ impl Tracer {
             mem: Memory::attach(pid)?
         })
     }
-    fn inner_next(&mut self, flags: u8) -> Result<&mut Self> {
-        if let Some(handler) = self.inner_next_event(flags)? {
-            handler.ignore()?;
-        }
-        Ok(self)
-    }
-    fn inner_next_event(&mut self, flags: u8) -> Result<Option<EventHandler>> {
-        if self.file.write(&[flags])? == 0 {
-            Ok(Some(EventHandler { inner: self }))
-        } else {
-            Ok(None)
-        }
-    }
     /// Set a breakpoint on the next specified stop, and wait for the
-    /// breakpoint to be reached (unless tracer is
-    /// nonblocking). Returns a reference to self to allow a tiny bit
-    /// of chaining. In synchronized mode, any events are acknowledged
-    /// and ignored.
-    pub fn next(&mut self, flags: Stop) -> Result<&mut Self> {
-        self.inner_next(flags.bits())
+    /// breakpoint to be reached (unless tracer is nonblocking). For
+    /// convenience in the majority of use-cases, this panics on
+    /// non-breakpoint events and returns the breaking event whenever
+    /// the first matching breakpoint is hit. For being able to use
+    /// non-breakpoint events, see the `next_event` function.
+    pub fn next(&mut self, flags: Flags) -> Result<Event> {
+        self.next_event(flags)?.from_callback(
+            |event| panic!("`Tracer::next` should never be used to \
+            handle non-breakpoint events, see `Tracer::next_event` \
+            instead. Event: {:?}", event)
+        )
     }
-    /// Same as `next`, but may return from the wait early (with the
-    /// tracee still running) if it encounters an event. In that case,
-    /// it will return an EventHandler that lets you control exactly
-    /// what happens to it. In nonblock mode, this should **always**
-    /// return `Ok(None)`.
-    pub fn next_event(&mut self, flags: Stop) -> Result<Option<EventHandler>> {
-        self.inner_next_event(flags.bits())
+    /// Similarly to `next`, but instead of convencently returning a
+    /// breakpoint event, it returns an event handler that lets you
+    /// handle events yourself.
+    pub fn next_event(&mut self, flags: Flags) -> Result<EventHandler> {
+        self.file.write(&flags.bits().to_ne_bytes())?;
+        Ok(EventHandler { inner: self })
     }
     /// Convert this tracer to be nonblocking. Setting breakpoints
     /// will no longer wait by default, but you will gain access to a
@@ -230,7 +234,12 @@ pub struct EventHandler<'a> {
     inner: &'a mut Tracer
 }
 impl<'a> EventHandler<'a> {
-    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Result<PtraceEvent>> + 'b {
+    /// Returns an iterator over ptrace events. This iterator is not a
+    /// fused one: It does NOT guarantee that reaching the end means
+    /// it'll never get another one. This is because non-breakpoint
+    /// events keep the tracee still running which can add more to the
+    /// queue at any time essentially.
+    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Result<Event>> + 'b {
         let mut buf = [MaybeUninit::<syscall::PtraceEvent>::uninit(); 4];
         let mut i = 0;
         let mut len = 0;
@@ -248,45 +257,51 @@ impl<'a> EventHandler<'a> {
                 }
                 i = 0;
             }
-            let ret = PtraceEvent::new(unsafe {
+            let ret = Event::new(unsafe {
                 ptr::read(buf[i].as_mut_ptr())
             });
             i += 1;
             Some(Ok(ret))
         })
     }
-    /// Tries to wait for the initial breakpoint to be
-    /// reached. Returns None if it managed, but itself if another
-    /// event interrupted it and has to be handled.
-    pub fn retry(self) -> Result<Option<Self>> {
-        // Not using mem::forget in `else` block because of eventual
-        // I/O errors that will drop
-        if self.inner.file.write(&[syscall::PTRACE_WAIT])? == 0 {
-            Ok(Some(self))
-        } else {
-            Ok(None)
-        }
+    /// Tries to wait for a breakpoint event to be reached. To find
+    /// out if a breakpoint event *was* reached, use the `iter`
+    /// function to get events.
+    pub fn retry(&mut self) -> Result<()> {
+        self.inner.file.write(&Flags::FLAG_WAIT.bits().to_ne_bytes())?;
+        Ok(())
     }
     /// Handle events by calling a specified callback until breakpoint
     /// is reached
-    pub fn from_callback<F, E>(mut self, mut callback: F) -> std::result::Result<(), E>
+    pub fn from_callback<F, E>(mut self, mut callback: F) -> std::result::Result<Event, E>
     where
-        F: FnMut(PtraceEvent) -> std::result::Result<(), E>,
+        F: FnMut(Event) -> std::result::Result<(), E>,
         E: From<io::Error>
     {
-        loop {
-            for event in self.iter() {
-                callback(event?)?;
+        'outer: loop {
+            let mut events = self.iter();
+
+            while let Some(event) = events.next() {
+                let event = event?;
+
+                if event.cause & Flags::STOP_ALL == Flags::empty() {
+                    callback(event)?;
+                } else {
+                    assert!(
+                        events.next().is_none(),
+                        "Another event after breakpoint was reached. This *may* be a kernel bug, please report."
+                    );
+                    break 'outer Ok(event);
+                }
             }
-            match self.retry()? {
-                Some(me) => self = me,
-                None => break
-            }
+
+            drop(events);
+
+            self.retry()?;
         }
-        Ok(())
     }
     /// Ignore events, just acknowledge them and move on
-    pub fn ignore(self) -> Result<()> {
+    pub fn ignore(self) -> Result<Event> {
         self.from_callback(|_| Ok(()))
     }
 }
@@ -300,21 +315,6 @@ impl NonblockTracer {
     pub fn blocking(self) -> Result<Tracer> {
         e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, self.old_flags))?;
         Ok(self.inner)
-    }
-    /// Similar to how calling `next` on a blocking tracer works, wait
-    /// until the set (if any) breakpoint is reached. This will
-    /// acknowledge and ignore any events. This **will** block, just
-    /// like if the handle wasn't actually nonblocking.
-    pub fn wait(&mut self) -> Result<()> {
-        self.inner_next(syscall::PTRACE_WAIT)
-            .map(|_| ())
-    }
-    /// Like `wait`, return early with a handler if an event
-    /// occurs. See the documentation on the synchronized `next_event`
-    /// for details. This **will** block, just like if the handle wasn't
-    /// actually nonblocking.
-    pub fn wait_event(&mut self) -> Result<Option<EventHandler>> {
-        self.inner_next_event(syscall::PTRACE_WAIT)
     }
 }
 impl Deref for NonblockTracer {

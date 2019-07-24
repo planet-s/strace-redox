@@ -7,11 +7,16 @@ use std::{
     path::PathBuf,
 };
 
-use strace::{EventHandler, Pid, Tracer, Stop};
+use strace::{Flags, Pid, Tracer};
 
 fn e<T>(res: syscall::Result<T>) -> Result<T> {
     res.map_err(|err| Error::from_raw_os_error(err.errno))
 }
+
+const TRACE_FLAGS: Flags = Flags::from_bits_truncate(
+    (Flags::STOP_ALL.bits() & !Flags::STOP_SINGLESTEP.bits())
+        | Flags::EVENT_ALL.bits()
+);
 
 fn main() -> Result<()> {
     let cmd = match env::args().nth(1) {
@@ -85,33 +90,38 @@ fn parent(path: PathBuf, pid: Pid) -> Result<()> {
     e(syscall::kill(pid, syscall::SIGCONT))?;
 
     let mut main_loop = move || -> Result<()> {
-        let handle = |handler: Option<EventHandler>| if let Some(handler) = handler {
-            handler.from_callback(|event| -> Result<()> {
-                eprintln!("EVENT: {:?}", event);
-                Ok(())
-            })
-        } else {
-            Ok(())
-        };
+        let mut unclosed = Vec::new();
+
+        // There will first be a post-syscall for `kill`.
+        tracer.next(Flags::STOP_POST_SYSCALL)?;
+
         loop {
-            handle(tracer.next_event(Stop::SYSCALL)?)?;
-            let regs = tracer.regs.get_int()?;
-            let syscall = regs.format_syscall_full(&mut tracer.mem);
-            eprintln!("SYSCALL:     {}", syscall);
+            let event = tracer.next_event(TRACE_FLAGS)?
+                .from_callback(|event| -> Result<()> {
+                    eprintln!("EVENT: {:?}", event);
+                    Ok(())
+                })?;
 
-            if regs.0.rax == syscall::SYS_FEXEC {
-                // fexec(...) doesn't return on success
-                continue;
-            }
+            if event.cause == Flags::STOP_PRE_SYSCALL {
+                let regs = tracer.regs.get_int()?;
+                let syscall = regs.format_syscall_full(&mut tracer.mem);
 
-            handle(tracer.next_event(Stop::SYSCALL)?)?;
-            let regs = tracer.regs.get_int()?;
-            let ret = regs.return_value();
+                eprintln!("SYSCALL:     {}", syscall);
+                unclosed.push(syscall);
+            } else if event.cause == Flags::STOP_POST_SYSCALL {
+                let syscall = unclosed.pop();
+                let syscall = syscall.as_ref().map(|s| &**s).unwrap_or("<unmatched syscall>");
 
-            eprint!("SYSCALL RET: {} = ", syscall);
-            match syscall::Error::demux(ret) {
-                Ok(val) => eprintln!("Ok({} ({:#X}))", val, val),
-                Err(err) => eprintln!("Err(\"{}\" ({:#X})) ({:#X})", err, err.errno, ret),
+                let regs = tracer.regs.get_int()?;
+                let ret = regs.return_value();
+
+                eprint!("SYSCALL RET: {} = ", syscall);
+                match syscall::Error::demux(ret) {
+                    Ok(val) => eprintln!("Ok({} ({:#X}))", val, val),
+                    Err(err) => eprintln!("Err(\"{}\" ({:#X})) ({:#X})", err, err.errno, ret),
+                }
+            } else {
+                eprintln!("OTHER BREAKPOINT: {:?}", event);
             }
         }
     };
