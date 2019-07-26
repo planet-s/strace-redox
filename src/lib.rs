@@ -4,7 +4,7 @@
 use bitflags::bitflags;
 use std::{
     fmt,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, prelude::*, Result, SeekFrom},
     iter,
     mem::{self, MaybeUninit},
@@ -183,17 +183,17 @@ impl Tracer {
     /// Attach to a tracer with the specified PID. This will stop it.
     pub fn attach(pid: Pid) -> Result<Self> {
         Ok(Self {
-            file: File::open(format!("proc:{}/trace", pid))?,
+            file: OpenOptions::new().read(true).write(true).truncate(true).open(format!("proc:{}/trace", pid))?,
             regs: Registers::attach(pid)?,
             mem: Memory::attach(pid)?
         })
     }
     /// Set a breakpoint on the next specified stop, and wait for the
-    /// breakpoint to be reached (unless tracer is nonblocking). For
-    /// convenience in the majority of use-cases, this panics on
-    /// non-breakpoint events and returns the breaking event whenever
-    /// the first matching breakpoint is hit. For being able to use
-    /// non-breakpoint events, see the `next_event` function.
+    /// breakpoint to be reached. For convenience in the majority of
+    /// use-cases, this panics on non-breakpoint events and returns
+    /// the breaking event whenever the first matching breakpoint is
+    /// hit. For being able to use non-breakpoint events, see the
+    /// `next_event` function.
     pub fn next(&mut self, flags: Flags) -> Result<Event> {
         self.next_event(flags)?.from_callback(
             |event| panic!("`Tracer::next` should never be used to \
@@ -201,7 +201,7 @@ impl Tracer {
             instead. Event: {:?}", event)
         )
     }
-    /// Similarly to `next`, but instead of convencently returning a
+    /// Similarly to `next`, but instead of conveniently returning a
     /// breakpoint event, it returns an event handler that lets you
     /// handle events yourself.
     pub fn next_event(&mut self, flags: Flags) -> Result<EventHandler> {
@@ -222,31 +222,16 @@ impl Tracer {
             inner: self
         })
     }
-}
-impl fmt::Debug for Tracer {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Tracer(...)")
-    }
-}
-
-#[must_use = "The tracer may not be finished waiting unless you call `retry` here"]
-pub struct EventHandler<'a> {
-    inner: &'a mut Tracer
-}
-impl<'a> EventHandler<'a> {
-    /// Returns an iterator over ptrace events. This iterator is not a
-    /// fused one: It does NOT guarantee that reaching the end means
-    /// it'll never get another one. This is because non-breakpoint
-    /// events keep the tracee still running which can add more to the
-    /// queue at any time essentially.
-    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Result<Event>> + 'b {
+    /// Same as `EventHandler::iter`, but does not rely on having an
+    /// event handler. When only using a blocking tracer you shouldn't
+    /// need to worry about this.
+    pub fn events(&'_ mut self) -> impl Iterator<Item = Result<Event>> + '_ {
         let mut buf = [MaybeUninit::<syscall::PtraceEvent>::uninit(); 4];
         let mut i = 0;
         let mut len = 0;
-        let trace = &mut *self.inner;
         iter::from_fn(move || {
             if i >= len {
-                len = match trace.file.read(unsafe {
+                len = match self.file.read(unsafe {
                     slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * mem::size_of::<syscall::PtraceEvent>())
                 }) {
                     Ok(n) => n / mem::size_of::<syscall::PtraceEvent>(),
@@ -263,6 +248,36 @@ impl<'a> EventHandler<'a> {
             i += 1;
             Some(Ok(ret))
         })
+    }
+}
+impl fmt::Debug for Tracer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Tracer(...)")
+    }
+}
+
+#[must_use = "The tracer may not be finished waiting unless you call `retry` here"]
+pub struct EventHandler<'a> {
+    inner: &'a mut Tracer
+}
+impl<'a> EventHandler<'a> {
+    /// Pop one event. Prefer the use of the `iter` function instead
+    /// as it batches reads. Only reason for this would be to have
+    /// control over exactly what gets requested from to the kernel.
+    pub fn pop_one(&mut self) -> Result<Option<Event>> {
+        let mut event = syscall::PtraceEvent::default();
+        match self.inner.file.read(&mut event)? {
+            0 => Ok(None),
+            _ => Ok(Some(Event::new(event)))
+        }
+    }
+    /// Returns an iterator over ptrace events. This iterator is not a
+    /// fused one: It does NOT guarantee that reaching the end means
+    /// it'll never get another one. This is because non-breakpoint
+    /// events keep the tracee still running which can add more to the
+    /// queue at any time essentially.
+    pub fn iter(&'_ mut self) -> impl Iterator<Item = Result<Event>> + '_ {
+        self.inner.events()
     }
     /// Tries to wait for a breakpoint event to be reached. To find
     /// out if a breakpoint event *was* reached, use the `iter`
@@ -284,12 +299,13 @@ impl<'a> EventHandler<'a> {
             while let Some(event) = events.next() {
                 let event = event?;
 
-                if event.cause & Flags::STOP_ALL == Flags::empty() {
+                if event.cause & Flags::EVENT_ALL == event.cause {
                     callback(event)?;
                 } else {
+                    let next = events.next();
                     assert!(
-                        events.next().is_none(),
-                        "Another event after breakpoint was reached. This *may* be a kernel bug, please report."
+                        next.is_none(),
+                        "Breakpoint event wasn't final event. This is possible to handle, but usually not what you want."
                     );
                     break 'outer Ok(event);
                 }
@@ -311,8 +327,25 @@ pub struct NonblockTracer {
     inner: Tracer
 }
 impl NonblockTracer {
-    /// Convert this tracer back to a blocking version
-    pub fn blocking(self) -> Result<Tracer> {
+    /// Sets a breakpoint on the specified stop, without doing
+    /// anything else: No handling of events, no getting what
+    /// breakpoint actually caused this, no waiting for the
+    /// breakpoint.
+    pub fn next(&mut self, flags: Flags) -> Result<()> {
+        self.file.write(&flags.bits().to_ne_bytes())?;
+        Ok(())
+    }
+    /// Stub that prevents you from accidentally calling `next_event`
+    /// on the tracer, do not use.
+    #[deprecated(since = "forever", note = "Do not use next_event on a nonblocking tracer")]
+    pub fn next_event(&mut self, _flags: Flags) -> Result<EventHandler> {
+        panic!("Tried to use next_event on a nonblocking tracer")
+    }
+
+    /// Convert this tracer back to a blocking version. Any yet unread
+    /// events are ignored.
+    pub fn blocking(mut self) -> Result<Tracer> {
+        self.events().for_each(|_| ());
         e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, self.old_flags))?;
         Ok(self.inner)
     }
