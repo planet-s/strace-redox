@@ -24,17 +24,17 @@ fn e<T>(res: syscall::Result<T>) -> Result<T> {
 
 bitflags! {
     pub struct Flags: u64 {
-        const STOP_PRE_SYSCALL = syscall::PTRACE_STOP_PRE_SYSCALL;
-        const STOP_POST_SYSCALL = syscall::PTRACE_STOP_POST_SYSCALL;
-        const STOP_SINGLESTEP = syscall::PTRACE_STOP_SINGLESTEP;
-        const STOP_SIGNAL = syscall::PTRACE_STOP_SIGNAL;
+        const STOP_PRE_SYSCALL = syscall::PTRACE_STOP_PRE_SYSCALL.bits();
+        const STOP_POST_SYSCALL = syscall::PTRACE_STOP_POST_SYSCALL.bits();
+        const STOP_SINGLESTEP = syscall::PTRACE_STOP_SINGLESTEP.bits();
+        const STOP_SIGNAL = syscall::PTRACE_STOP_SIGNAL.bits();
         const STOP_ALL = Self::STOP_PRE_SYSCALL.bits | Self::STOP_POST_SYSCALL.bits | Self::STOP_SINGLESTEP.bits | Self::STOP_SIGNAL.bits;
 
-        const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE;
+        const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE.bits();
         const EVENT_ALL = Self::EVENT_CLONE.bits;
 
-        const FLAG_SYSEMU = syscall::PTRACE_FLAG_SYSEMU;
-        const FLAG_WAIT = syscall::PTRACE_FLAG_WAIT;
+        const FLAG_SYSEMU = syscall::PTRACE_FLAG_SYSEMU.bits();
+        const FLAG_WAIT = syscall::PTRACE_FLAG_WAIT.bits();
         const FLAG_ALL = Self::FLAG_SYSEMU.bits | Self::FLAG_WAIT.bits;
     }
 }
@@ -99,7 +99,7 @@ pub struct Event {
 impl Event {
     pub fn new(inner: syscall::PtraceEvent) -> Self {
         Self {
-            cause: Flags::from_bits_truncate(inner.cause),
+            cause: Flags::from_bits_truncate(inner.cause.bits()),
             data: match inner.cause {
                 syscall::PTRACE_EVENT_CLONE => EventData::EventClone(inner.a),
                 syscall::PTRACE_STOP_SIGNAL => EventData::StopSignal(inner.a, inner.b),
@@ -183,9 +183,11 @@ impl Tracer {
     /// Attach to a tracer with the specified PID. This will stop it.
     pub fn attach(pid: Pid) -> Result<Self> {
         Ok(Self {
-            file: OpenOptions::new().read(true).write(true).truncate(true).open(format!("proc:{}/trace", pid))?,
+            file: OpenOptions::new().read(true).write(true)
+                .truncate(true)
+                .open(format!("proc:{}/trace", pid))?,
             regs: Registers::attach(pid)?,
-            mem: Memory::attach(pid)?
+            mem: Memory::attach(pid)?,
         })
     }
     /// Set a breakpoint on the next specified stop, and wait for the
@@ -218,20 +220,25 @@ impl Tracer {
         let new_flags = old_flags | syscall::O_NONBLOCK;
         e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, new_flags))?;
         Ok(NonblockTracer {
-            old_flags,
+            old_flags: Some(old_flags),
             inner: self
         })
     }
     /// Same as `EventHandler::iter`, but does not rely on having an
     /// event handler. When only using a blocking tracer you shouldn't
     /// need to worry about this.
-    pub fn events(&'_ mut self) -> impl Iterator<Item = Result<Event>> + '_ {
+    pub fn events(&self) -> Result<impl Iterator<Item = Result<Event>>> {
         let mut buf = [MaybeUninit::<syscall::PtraceEvent>::uninit(); 4];
         let mut i = 0;
         let mut len = 0;
-        iter::from_fn(move || {
+
+        // I don't like this clone, but I don't want tracer.events()
+        // to prevent tracer from being borrowed again.
+        let mut file = self.file.try_clone()?;
+
+        Ok(iter::from_fn(move || {
             if i >= len {
-                len = match self.file.read(unsafe {
+                len = match file.read(unsafe {
                     slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * mem::size_of::<syscall::PtraceEvent>())
                 }) {
                     Ok(n) => n / mem::size_of::<syscall::PtraceEvent>(),
@@ -247,7 +254,7 @@ impl Tracer {
             });
             i += 1;
             Some(Ok(ret))
-        })
+        }))
     }
 }
 impl fmt::Debug for Tracer {
@@ -276,7 +283,7 @@ impl<'a> EventHandler<'a> {
     /// it'll never get another one. This is because non-breakpoint
     /// events keep the tracee still running which can add more to the
     /// queue at any time essentially.
-    pub fn iter(&'_ mut self) -> impl Iterator<Item = Result<Event>> + '_ {
+    pub fn iter(&self) -> Result<impl Iterator<Item = Result<Event>>> {
         self.inner.events()
     }
     /// Tries to wait for a breakpoint event to be reached. To find
@@ -294,7 +301,7 @@ impl<'a> EventHandler<'a> {
         E: From<io::Error>
     {
         'outer: loop {
-            let mut events = self.iter();
+            let mut events = self.iter()?;
 
             while let Some(event) = events.next() {
                 let event = event?;
@@ -323,10 +330,24 @@ impl<'a> EventHandler<'a> {
 }
 
 pub struct NonblockTracer {
-    old_flags: usize,
+    old_flags: Option<usize>,
     inner: Tracer
 }
 impl NonblockTracer {
+    /// Similar to `Tracer::attach`, but opens directly in nonblocking
+    /// mode which saves one system call.
+    pub fn attach(pid: Pid) -> Result<Self> {
+        Ok(Self {
+            old_flags: None,
+            inner: Tracer {
+                file: OpenOptions::new()
+                    .read(true).write(true)
+                    .truncate(true).open(format!("proc:{}/trace", pid))?,
+                regs: Registers::attach(pid)?,
+                mem: Memory::attach(pid)?,
+            }
+        })
+    }
     /// Sets a breakpoint on the specified stop, without doing
     /// anything else: No handling of events, no getting what
     /// breakpoint actually caused this, no waiting for the
@@ -344,9 +365,16 @@ impl NonblockTracer {
 
     /// Convert this tracer back to a blocking version. Any yet unread
     /// events are ignored.
-    pub fn blocking(mut self) -> Result<Tracer> {
-        self.events().for_each(|_| ());
-        e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, self.old_flags))?;
+    pub fn blocking(self) -> Result<Tracer> {
+        self.events()?.for_each(|_| ());
+        let old_flags = match self.old_flags {
+            Some(flags) => flags,
+            None => {
+                let flags = e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_GETFL, 0))?;
+                flags & !syscall::O_NONBLOCK
+            }
+        };
+        e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, old_flags))?;
         Ok(self.inner)
     }
 }

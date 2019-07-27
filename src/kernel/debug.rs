@@ -218,11 +218,11 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_CLOCK_GETTIME => format!(
             "clock_gettime({}, {:?})",
             b,
-            validate_slice!(c as *const TimeSpec, 1)
+            validate_slice!(c as *mut TimeSpec, 1)
         ),
         SYS_CLONE => format!(
-            "clone({})",
-            b
+            "clone({:?})",
+            CloneFlags::from_bits(b)
         ),
         SYS_EXIT => format!(
             "exit({})",
@@ -254,7 +254,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         SYS_FUTEX => format!(
             "futex({:#X} [{:?}], {}, {}, {}, {})",
             b,
-            validate_slice!(b as *const i32, 1).map(|uaddr| uaddr[0]),
+            validate_slice!(b as *mut i32, 1).map(|uaddr| uaddr[0]),
             c,
             d,
             e,
@@ -302,10 +302,10 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             validate_slice!(b as *const [usize; 2], c)
         ),
         SYS_MPROTECT => format!(
-            "mprotect({:#X}, {}, {:#X})",
+            "mprotect({:#X}, {}, {:?})",
             b,
             c,
-            d
+            ProtFlags::from_bits(d)
         ),
         SYS_NANOSLEEP => format!(
             "nanosleep({:?}, ({}, {}))",
@@ -323,10 +323,10 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             c
         ),
         SYS_PHYSMAP => format!(
-            "physmap({:#X}, {}, {:#X})",
+            "physmap({:#X}, {}, {:?})",
             b,
             c,
-            d
+            PhysmapFlags::from_bits(d)
         ),
         SYS_PHYSUNMAP => format!(
             "physunmap({:#X})",
@@ -338,7 +338,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
         ),
         SYS_PIPE2 => format!(
             "pipe2({:?}, {})",
-            validate_slice!(b as *const usize, 2),
+            validate_slice!(b as *mut usize, 2),
             c
         ),
         SYS_SETREGID => format!(
@@ -361,10 +361,10 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             b
         ),
         SYS_WAITPID => format!(
-            "waitpid({}, {:#X}, {})",
+            "waitpid({}, {:#X}, {:?})",
             b,
             c,
-            d
+            WaitFlags::from_bits(d)
         ),
         SYS_YIELD => format!("yield()"),
         _ => format!(

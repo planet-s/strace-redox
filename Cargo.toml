@@ -6,7 +6,12 @@ edition = "2018"
 
 [dependencies]
 bitflags = "1.1.0"
+structopt = { version = "0.2.18", optional = true }
 
 # redox_syscall = { git = "https://gitlab.redox-os.org/jD91mZM2/syscall.git", branch = "ptrace" }
 # redox_syscall = { git = "https://gitlab.redox-os.org/redox-os/syscall.git" }
 redox_syscall = { path = "/home/user/redox-nix/redox/kernel/syscall" }
+
+[features]
+default = [ "advanced" ]
+advanced = [ "structopt" ]

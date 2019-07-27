@@ -9,27 +9,25 @@ use std::{
 
 use strace::{Flags, Pid, Tracer};
 
+mod bin_modes;
+
+use bin_modes as mode;
+
 fn e<T>(res: syscall::Result<T>) -> Result<T> {
     res.map_err(|err| Error::from_raw_os_error(err.errno))
 }
 
-const TRACE_FLAGS: Flags = Flags::from_bits_truncate(
+pub const TRACE_FLAGS: Flags = Flags::from_bits_truncate(
     (Flags::STOP_ALL.bits() & !Flags::STOP_SINGLESTEP.bits())
         | Flags::EVENT_ALL.bits()
 );
 
 fn main() -> Result<()> {
-    let cmd = match env::args().nth(1) {
-        Some(cmd) => cmd,
-        None => {
-            eprintln!("Usage: strace <path>");
-            return Ok(());
-        }
-    };
+    let opt = mode::parse_args();
 
     let mut file = None;
     for mut path in env::split_paths(&env::var_os("PATH").unwrap_or(OsString::new())) {
-        path.push(&cmd);
+        path.push(&opt.cmd[0]);
         if let Ok(fd) = e(syscall::open(&path.as_os_str().as_bytes(), syscall::O_RDONLY)) {
             file = Some((path, fd));
             break;
@@ -44,15 +42,15 @@ fn main() -> Result<()> {
         }
     };
 
-    match e(unsafe { syscall::clone(0) })? {
-        0 => child(fd),
-        pid => parent(path, pid)
+    match e(unsafe { syscall::clone(syscall::CloneFlags::empty()) })? {
+        0 => child(fd, opt.cmd.clone()),
+        pid => parent(path, pid, opt)
     }
 }
 
-fn child(fd: usize) -> Result<()> {
+fn child(fd: usize, cmd_args: Vec<String>) -> Result<()> {
     let mut args = Vec::new();
-    for arg in env::args().skip(1) {
+    for arg in cmd_args {
         let len = arg.len();
         let ptr = arg.as_ptr() as usize;
         mem::forget(arg);
@@ -76,7 +74,7 @@ fn child(fd: usize) -> Result<()> {
     unreachable!("fexec can't return Ok(_)")
 }
 
-fn parent(path: PathBuf, pid: Pid) -> Result<()> {
+fn parent(path: PathBuf, pid: Pid, opt: mode::Opt) -> Result<()> {
     let mut status = 0;
 
     eprintln!("Executing {} (PID {})", path.display(), pid);
@@ -89,43 +87,10 @@ fn parent(path: PathBuf, pid: Pid) -> Result<()> {
     // Won't actually restart the process, because it's stopped by ptrace
     e(syscall::kill(pid, syscall::SIGCONT))?;
 
-    let mut main_loop = move || -> Result<()> {
-        let mut unclosed = Vec::new();
+    // There will first be a post-syscall for `kill`.
+    tracer.next(Flags::STOP_POST_SYSCALL)?;
 
-        // There will first be a post-syscall for `kill`.
-        tracer.next(Flags::STOP_POST_SYSCALL)?;
-
-        loop {
-            let event = tracer.next_event(TRACE_FLAGS)?
-                .from_callback(|event| -> Result<()> {
-                    eprintln!("EVENT: {:?}", event);
-                    Ok(())
-                })?;
-
-            if event.cause == Flags::STOP_PRE_SYSCALL {
-                let regs = tracer.regs.get_int()?;
-                let syscall = regs.format_syscall_full(&mut tracer.mem);
-
-                eprintln!("SYSCALL:     {}", syscall);
-                unclosed.push(syscall);
-            } else if event.cause == Flags::STOP_POST_SYSCALL {
-                let syscall = unclosed.pop();
-                let syscall = syscall.as_ref().map(|s| &**s).unwrap_or("<unmatched syscall>");
-
-                let regs = tracer.regs.get_int()?;
-                let ret = regs.return_value();
-
-                eprint!("SYSCALL RET: {} = ", syscall);
-                match syscall::Error::demux(ret) {
-                    Ok(val) => eprintln!("Ok({} ({:#X}))", val, val),
-                    Err(err) => eprintln!("Err(\"{}\" ({:#X})) ({:#X})", err, err.errno, ret),
-                }
-            } else {
-                eprintln!("OTHER BREAKPOINT: {:?}", event);
-            }
-        }
-    };
-    match main_loop() {
+    match mode::inner_main(pid, tracer, opt) {
         Err(ref err) if err.raw_os_error() == Some(syscall::ESRCH) => {
             e(syscall::waitpid(pid, &mut status, syscall::WNOHANG))?;
             if syscall::wifexited(status) {
