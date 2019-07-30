@@ -33,9 +33,9 @@ bitflags! {
         const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE.bits();
         const EVENT_ALL = Self::EVENT_CLONE.bits;
 
-        const FLAG_SYSEMU = syscall::PTRACE_FLAG_SYSEMU.bits();
+        const FLAG_IGNORE = syscall::PTRACE_FLAG_IGNORE.bits();
         const FLAG_WAIT = syscall::PTRACE_FLAG_WAIT.bits();
-        const FLAG_ALL = Self::FLAG_SYSEMU.bits | Self::FLAG_WAIT.bits;
+        const FLAG_ALL = Self::FLAG_IGNORE.bits | Self::FLAG_WAIT.bits;
     }
 }
 

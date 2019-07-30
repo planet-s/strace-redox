@@ -305,7 +305,7 @@ pub fn format_call(mut mem: Option<&mut Memory>, a: usize, b: usize, c: usize, d
             "mprotect({:#X}, {}, {:?})",
             b,
             c,
-            ProtFlags::from_bits(d)
+            MapFlags::from_bits(d)
         ),
         SYS_NANOSLEEP => format!(
             "nanosleep({:?}, ({}, {}))",
