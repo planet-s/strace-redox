@@ -18,8 +18,7 @@ fn e<T>(res: syscall::Result<T>) -> Result<T> {
 }
 
 pub const TRACE_FLAGS: Flags = Flags::from_bits_truncate(
-    (Flags::STOP_ALL.bits() & !Flags::STOP_SINGLESTEP.bits())
-        | Flags::EVENT_ALL.bits()
+    (Flags::STOP_ALL.bits() & !Flags::STOP_SINGLESTEP.bits()) | Flags::EVENT_ALL.bits(),
 );
 
 fn main() -> Result<()> {
@@ -28,7 +27,10 @@ fn main() -> Result<()> {
     let mut file = None;
     for mut path in env::split_paths(&env::var_os("PATH").unwrap_or(OsString::new())) {
         path.push(&opt.cmd[0]);
-        if let Ok(fd) = e(syscall::open(&path.as_os_str().as_bytes(), syscall::O_RDONLY)) {
+        if let Ok(fd) = e(syscall::open(
+            &path.as_os_str().as_bytes(),
+            syscall::O_RDONLY,
+        )) {
             file = Some((path, fd));
             break;
         }
@@ -39,12 +41,12 @@ fn main() -> Result<()> {
         None => {
             eprintln!("Could not find that binary in $PATH");
             return Ok(());
-        }
+        },
     };
 
     match e(unsafe { syscall::clone(syscall::CloneFlags::empty()) })? {
         0 => child(fd, opt.cmd.clone()),
-        pid => parent(path, pid, opt)
+        pid => parent(path, pid, opt),
     }
 }
 
@@ -94,13 +96,16 @@ fn parent(path: PathBuf, pid: Pid, opt: mode::Opt) -> Result<()> {
         Err(ref err) if err.raw_os_error() == Some(syscall::ESRCH) => {
             e(syscall::waitpid(pid, &mut status, syscall::WNOHANG))?;
             if syscall::wifexited(status) {
-                println!("Process exited with status {}", syscall::wexitstatus(status));
+                println!(
+                    "Process exited with status {}",
+                    syscall::wexitstatus(status)
+                );
             }
             if syscall::wifsignaled(status) {
                 println!("Process signaled with status {}", syscall::wtermsig(status));
             }
             Ok(())
         },
-        other => other
+        other => other,
     }
 }

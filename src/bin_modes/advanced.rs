@@ -4,12 +4,9 @@ use std::{
     io::{prelude::*, Result},
     os::unix::io::AsRawFd,
 };
-use syscall::{
-    data::Event,
-    flag::EVENT_READ
-};
+use syscall::{data::Event, flag::EVENT_READ};
 
-use strace::{Flags, EventData, NonblockTracer, Pid, Tracer};
+use strace::{EventData, Flags, NonblockTracer, Pid, Tracer};
 
 use structopt::StructOpt;
 
@@ -21,7 +18,7 @@ pub struct Opt {
     /// top level child process
     recursive: bool,
     /// Specify the command and arguments to run
-    pub cmd: Vec<String>
+    pub cmd: Vec<String>,
 }
 
 pub fn parse_args() -> Opt {
@@ -31,7 +28,7 @@ pub fn parse_args() -> Opt {
 struct Handle {
     pid: Pid,
     tracer: NonblockTracer,
-    unclosed: Vec<String>
+    unclosed: Vec<String>,
 }
 
 pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
@@ -48,11 +45,14 @@ pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
     })?;
 
     let mut tracers = HashMap::new();
-    tracers.insert(next_id, Handle {
-        pid: root,
-        tracer,
-        unclosed: Vec::new(),
-    });
+    tracers.insert(
+        next_id,
+        Handle {
+            pid: root,
+            tracer,
+            unclosed: Vec::new(),
+        },
+    );
     next_id += 1;
 
     loop {
@@ -78,7 +78,10 @@ pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
                 handle.unclosed.push(syscall);
             } else if event.cause == Flags::STOP_POST_SYSCALL {
                 let syscall = handle.unclosed.pop();
-                let syscall = syscall.as_ref().map(|s| &**s).unwrap_or("<unmatched syscall>");
+                let syscall = syscall
+                    .as_ref()
+                    .map(|s| &**s)
+                    .unwrap_or("<unmatched syscall>");
 
                 let regs = handle.tracer.regs.get_int()?;
                 let ret = regs.return_value();
@@ -102,11 +105,14 @@ pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
                             data: next_id,
                         })?;
 
-                        tracers.insert(next_id, Handle {
-                            pid,
-                            tracer: child,
-                            unclosed: Vec::new(),
-                        });
+                        tracers.insert(
+                            next_id,
+                            Handle {
+                                pid,
+                                tracer: child,
+                                unclosed: Vec::new(),
+                            },
+                        );
                         next_id += 1;
                     }
                 }

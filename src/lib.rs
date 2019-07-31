@@ -10,13 +10,12 @@ use std::{
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
     os::unix::io::AsRawFd,
-    ptr,
-    slice
+    ptr, slice,
 };
 
 mod arch;
-mod kernel;
 mod f80;
+mod kernel;
 
 fn e<T>(res: syscall::Result<T>) -> Result<T> {
     res.map_err(|err| io::Error::from_raw_os_error(err.errno))
@@ -97,7 +96,7 @@ pub enum EventData {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Event {
     pub cause: Flags,
-    pub data: EventData
+    pub data: EventData,
 }
 impl Event {
     pub fn new(inner: syscall::PtraceEvent) -> Self {
@@ -107,20 +106,20 @@ impl Event {
                 syscall::PTRACE_EVENT_CLONE => EventData::EventClone(inner.a),
                 syscall::PTRACE_STOP_SIGNAL => EventData::StopSignal(inner.a, inner.b),
                 _ => EventData::Unknown(inner.a, inner.b, inner.c, inner.d, inner.e, inner.f),
-            }
+            },
         }
     }
 }
 
 pub struct Registers {
     pub float: File,
-    pub int: File
+    pub int: File,
 }
 impl Registers {
     pub fn attach(pid: Pid) -> Result<Self> {
         Ok(Self {
             float: File::open(format!("proc:{}/regs/float", pid))?,
-            int: File::open(format!("proc:{}/regs/int", pid))?
+            int: File::open(format!("proc:{}/regs/int", pid))?,
         })
     }
     pub fn get_float(&mut self) -> Result<FloatRegisters> {
@@ -149,12 +148,12 @@ impl fmt::Debug for Registers {
 }
 
 pub struct Memory {
-    pub file: File
+    pub file: File,
 }
 impl Memory {
     pub fn attach(pid: Pid) -> Result<Self> {
         Ok(Self {
-            file: File::open(format!("proc:{}/mem", pid))?
+            file: File::open(format!("proc:{}/mem", pid))?,
         })
     }
     pub fn read(&mut self, from: *const u8, to: &mut [u8]) -> Result<()> {
@@ -180,13 +179,15 @@ impl fmt::Debug for Memory {
 pub struct Tracer {
     pub file: File,
     pub regs: Registers,
-    pub mem: Memory
+    pub mem: Memory,
 }
 impl Tracer {
     /// Attach to a tracer with the specified PID. This will stop it.
     pub fn attach(pid: Pid) -> Result<Self> {
         Ok(Self {
-            file: OpenOptions::new().read(true).write(true)
+            file: OpenOptions::new()
+                .read(true)
+                .write(true)
                 .truncate(true)
                 .open(format!("proc:{}/trace", pid))?,
             regs: Registers::attach(pid)?,
@@ -200,11 +201,13 @@ impl Tracer {
     /// hit. For being able to use non-breakpoint events, see the
     /// `next_event` function.
     pub fn next(&mut self, flags: Flags) -> Result<Event> {
-        self.next_event(flags)?.from_callback(
-            |event| panic!("`Tracer::next` should never be used to \
-            handle non-breakpoint events, see `Tracer::next_event` \
-            instead. Event: {:?}", event)
-        )
+        self.next_event(flags)?.from_callback(|event| {
+            panic!(
+                "`Tracer::next` should never be used to handle non-breakpoint events, see \
+                 `Tracer::next_event` instead. Event: {:?}",
+                event
+            )
+        })
     }
     /// Similarly to `next`, but instead of conveniently returning a
     /// breakpoint event, it returns an event handler that lets you
@@ -219,12 +222,20 @@ impl Tracer {
     /// mode. Useful for multiplexing tracers using the `event:`
     /// scheme.
     pub fn nonblocking(self) -> Result<NonblockTracer> {
-        let old_flags = e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_GETFL, 0))?;
+        let old_flags = e(syscall::fcntl(
+            self.file.as_raw_fd() as usize,
+            syscall::F_GETFL,
+            0,
+        ))?;
         let new_flags = old_flags | syscall::O_NONBLOCK;
-        e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, new_flags))?;
+        e(syscall::fcntl(
+            self.file.as_raw_fd() as usize,
+            syscall::F_SETFL,
+            new_flags,
+        ))?;
         Ok(NonblockTracer {
             old_flags: Some(old_flags),
-            inner: self
+            inner: self,
         })
     }
     /// Same as `EventHandler::iter`, but does not rely on having an
@@ -242,19 +253,20 @@ impl Tracer {
         Ok(iter::from_fn(move || {
             if i >= len {
                 len = match file.read(unsafe {
-                    slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * mem::size_of::<syscall::PtraceEvent>())
+                    slice::from_raw_parts_mut(
+                        buf.as_mut_ptr() as *mut u8,
+                        buf.len() * mem::size_of::<syscall::PtraceEvent>(),
+                    )
                 }) {
                     Ok(n) => n / mem::size_of::<syscall::PtraceEvent>(),
-                    Err(err) => return Some(Err(err))
+                    Err(err) => return Some(Err(err)),
                 };
                 if len == 0 {
                     return None;
                 }
                 i = 0;
             }
-            let ret = Event::new(unsafe {
-                ptr::read(buf[i].as_mut_ptr())
-            });
+            let ret = Event::new(unsafe { ptr::read(buf[i].as_mut_ptr()) });
             i += 1;
             Some(Ok(ret))
         }))
@@ -268,7 +280,7 @@ impl fmt::Debug for Tracer {
 
 #[must_use = "The tracer may not be finished waiting unless you call `retry` here"]
 pub struct EventHandler<'a> {
-    inner: &'a mut Tracer
+    inner: &'a mut Tracer,
 }
 impl<'a> EventHandler<'a> {
     /// Pop one event. Prefer the use of the `iter` function instead
@@ -278,7 +290,7 @@ impl<'a> EventHandler<'a> {
         let mut event = syscall::PtraceEvent::default();
         match self.inner.file.read(&mut event)? {
             0 => Ok(None),
-            _ => Ok(Some(Event::new(event)))
+            _ => Ok(Some(Event::new(event))),
         }
     }
     /// Returns an iterator over ptrace events. This iterator is not a
@@ -293,7 +305,9 @@ impl<'a> EventHandler<'a> {
     /// out if a breakpoint event *was* reached, use the `iter`
     /// function to get events.
     pub fn retry(&mut self) -> Result<()> {
-        self.inner.file.write(&Flags::FLAG_WAIT.bits().to_ne_bytes())?;
+        self.inner
+            .file
+            .write(&Flags::FLAG_WAIT.bits().to_ne_bytes())?;
         Ok(())
     }
     /// Handle events by calling a specified callback until breakpoint
@@ -301,7 +315,7 @@ impl<'a> EventHandler<'a> {
     pub fn from_callback<F, E>(mut self, mut callback: F) -> std::result::Result<Event, E>
     where
         F: FnMut(Event) -> std::result::Result<(), E>,
-        E: From<io::Error>
+        E: From<io::Error>,
     {
         'outer: loop {
             let mut events = self.iter()?;
@@ -315,7 +329,8 @@ impl<'a> EventHandler<'a> {
                     let next = events.next();
                     assert!(
                         next.is_none(),
-                        "Breakpoint event wasn't final event. This is possible to handle, but usually not what you want."
+                        "Breakpoint event wasn't final event. This is possible to handle, but \
+                         usually not what you want."
                     );
                     break 'outer Ok(event);
                 }
@@ -334,7 +349,7 @@ impl<'a> EventHandler<'a> {
 
 pub struct NonblockTracer {
     old_flags: Option<usize>,
-    inner: Tracer
+    inner: Tracer,
 }
 impl NonblockTracer {
     /// Similar to `Tracer::attach`, but opens directly in nonblocking
@@ -344,11 +359,13 @@ impl NonblockTracer {
             old_flags: None,
             inner: Tracer {
                 file: OpenOptions::new()
-                    .read(true).write(true)
-                    .truncate(true).open(format!("proc:{}/trace", pid))?,
+                    .read(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(format!("proc:{}/trace", pid))?,
                 regs: Registers::attach(pid)?,
                 mem: Memory::attach(pid)?,
-            }
+            },
         })
     }
     /// Sets a breakpoint on the specified stop, without doing
@@ -361,7 +378,10 @@ impl NonblockTracer {
     }
     /// Stub that prevents you from accidentally calling `next_event`
     /// on the tracer, do not use.
-    #[deprecated(since = "forever", note = "Do not use next_event on a nonblocking tracer")]
+    #[deprecated(
+        since = "forever",
+        note = "Do not use next_event on a nonblocking tracer"
+    )]
     pub fn next_event(&mut self, _flags: Flags) -> Result<EventHandler> {
         panic!("Tried to use next_event on a nonblocking tracer")
     }
@@ -373,11 +393,19 @@ impl NonblockTracer {
         let old_flags = match self.old_flags {
             Some(flags) => flags,
             None => {
-                let flags = e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_GETFL, 0))?;
+                let flags = e(syscall::fcntl(
+                    self.file.as_raw_fd() as usize,
+                    syscall::F_GETFL,
+                    0,
+                ))?;
                 flags & !syscall::O_NONBLOCK
-            }
+            },
         };
-        e(syscall::fcntl(self.file.as_raw_fd() as usize, syscall::F_SETFL, old_flags))?;
+        e(syscall::fcntl(
+            self.file.as_raw_fd() as usize,
+            syscall::F_SETFL,
+            old_flags,
+        ))?;
         Ok(self.inner)
     }
 }

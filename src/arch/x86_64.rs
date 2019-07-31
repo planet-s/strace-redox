@@ -14,7 +14,7 @@ impl FloatRegisters {
     }
     pub fn st_space(&self) -> [f64; 8] {
         let mut out = [0.0; 8];
-        for (i, &n) in {self.0.st_space}.iter().enumerate() {
+        for (i, &n) in { self.0.st_space }.iter().enumerate() {
             out[i] = f80_to_f64(n);
         }
         out

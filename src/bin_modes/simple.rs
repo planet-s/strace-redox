@@ -1,13 +1,9 @@
-use std::{
-    env,
-    io::Result,
-    process,
-};
+use std::{env, io::Result, process};
 
 use strace::{Flags, Pid, Tracer};
 
 pub struct Opt {
-    pub cmd: Vec<String>
+    pub cmd: Vec<String>,
 }
 
 pub fn parse_args() -> Opt {
@@ -23,11 +19,13 @@ pub fn inner_main(_pid: Pid, tracer: Tracer, _opt: Opt) -> Result<()> {
     let mut unclosed = Vec::new();
 
     loop {
-        let event = tracer.next_event(crate::TRACE_FLAGS)?
-            .from_callback(|event| -> Result<()> {
-                eprintln!("EVENT: {:?}", event);
-                Ok(())
-            })?;
+        let event =
+            tracer
+                .next_event(crate::TRACE_FLAGS)?
+                .from_callback(|event| -> Result<()> {
+                    eprintln!("EVENT: {:?}", event);
+                    Ok(())
+                })?;
 
         if event.cause == Flags::STOP_PRE_SYSCALL {
             let regs = tracer.regs.get_int()?;
@@ -37,7 +35,10 @@ pub fn inner_main(_pid: Pid, tracer: Tracer, _opt: Opt) -> Result<()> {
             unclosed.push(syscall);
         } else if event.cause == Flags::STOP_POST_SYSCALL {
             let syscall = unclosed.pop();
-            let syscall = syscall.as_ref().map(|s| &**s).unwrap_or("<unmatched syscall>");
+            let syscall = syscall
+                .as_ref()
+                .map(|s| &**s)
+                .unwrap_or("<unmatched syscall>");
 
             let regs = tracer.regs.get_int()?;
             let ret = regs.return_value();
