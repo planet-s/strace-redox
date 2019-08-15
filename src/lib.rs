@@ -28,9 +28,11 @@ bitflags! {
         const STOP_SINGLESTEP = syscall::PTRACE_STOP_SINGLESTEP.bits();
         const STOP_SIGNAL = syscall::PTRACE_STOP_SIGNAL.bits();
         const STOP_BREAKPOINT = syscall::PTRACE_STOP_BREAKPOINT.bits();
+        const STOP_EXIT = syscall::PTRACE_STOP_EXIT.bits();
         const STOP_ALL = Self::STOP_PRE_SYSCALL.bits
             | Self::STOP_POST_SYSCALL.bits | Self::STOP_SINGLESTEP.bits
-            | Self::STOP_SIGNAL.bits | Self::STOP_BREAKPOINT.bits;
+            | Self::STOP_SIGNAL.bits | Self::STOP_BREAKPOINT.bits
+            | Self::STOP_EXIT.bits;
 
         const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE.bits();
         const EVENT_ALL = Self::EVENT_CLONE.bits;
@@ -90,6 +92,7 @@ impl DerefMut for FloatRegisters {
 pub enum EventData {
     EventClone(usize),
     StopSignal(usize, usize),
+    StopExit(usize),
     Unknown(usize, usize, usize, usize, usize, usize),
 }
 
@@ -105,6 +108,7 @@ impl Event {
             data: match inner.cause {
                 syscall::PTRACE_EVENT_CLONE => EventData::EventClone(inner.a),
                 syscall::PTRACE_STOP_SIGNAL => EventData::StopSignal(inner.a, inner.b),
+                syscall::PTRACE_STOP_EXIT => EventData::StopExit(inner.a),
                 _ => EventData::Unknown(inner.a, inner.b, inner.c, inner.d, inner.e, inner.f),
             },
         }
