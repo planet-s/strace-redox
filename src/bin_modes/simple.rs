@@ -7,7 +7,7 @@ pub struct Opt {
 }
 
 pub fn parse_args() -> Opt {
-    let cmd = env::args().collect();
+    let cmd: Vec<_> = env::args().skip(1).collect();
     if cmd.is_empty() {
         eprintln!("Usage: strace <path>");
         process::exit(1);
@@ -15,7 +15,7 @@ pub fn parse_args() -> Opt {
     Opt { cmd }
 }
 
-pub fn inner_main(_pid: Pid, tracer: Tracer, _opt: Opt) -> Result<()> {
+pub fn inner_main(_pid: Pid, mut tracer: Tracer, _opt: Opt) -> Result<()> {
     let mut unclosed = Vec::new();
 
     loop {

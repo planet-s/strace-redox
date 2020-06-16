@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{prelude::*, Result},
+    io::{prelude::*, ErrorKind, Result},
     os::unix::io::AsRawFd,
 };
 use syscall::{data::Event, flag::EVENT_READ};
@@ -61,10 +61,12 @@ pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
         let index = event.data;
 
         let handle = tracers.get_mut(&index).unwrap();
-        handle.tracer.next(crate::TRACE_FLAGS)?;
 
         for event in handle.tracer.events()? {
-            let event = event?;
+            let event = match event {
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                x => x?,
+            };
 
             // We don't want to mutably borrow tracer across the
             // entire loop - rather, re-fetch it at each iteration.
@@ -118,5 +120,8 @@ pub fn inner_main(root: Pid, tracer: Tracer, opt: Opt) -> Result<()> {
                 }
             }
         }
+
+        let handle = tracers.get_mut(&index).unwrap();
+        handle.tracer.next(crate::TRACE_FLAGS)?;
     }
 }

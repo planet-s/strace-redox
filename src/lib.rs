@@ -1,6 +1,3 @@
-// Needed because Redox is using an outdated Rust
-#![feature(maybe_uninit)]
-
 use bitflags::bitflags;
 use std::{
     fmt,
@@ -9,7 +6,10 @@ use std::{
     iter,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
-    os::unix::io::AsRawFd,
+    os::unix::{
+        fs::OpenOptionsExt,
+        io::AsRawFd,
+    },
     ptr, slice,
 };
 
@@ -38,8 +38,7 @@ bitflags! {
         const EVENT_ALL = Self::EVENT_CLONE.bits;
 
         const FLAG_IGNORE = syscall::PTRACE_FLAG_IGNORE.bits();
-        const FLAG_WAIT = syscall::PTRACE_FLAG_WAIT.bits();
-        const FLAG_ALL = Self::FLAG_IGNORE.bits | Self::FLAG_WAIT.bits;
+        const FLAG_ALL = Self::FLAG_IGNORE.bits;
     }
 }
 
@@ -282,7 +281,7 @@ impl fmt::Debug for Tracer {
     }
 }
 
-#[must_use = "The tracer may not be finished waiting unless you call `retry` here"]
+#[must_use = "The tracer won't block unless you wait for events"]
 pub struct EventHandler<'a> {
     inner: &'a mut Tracer,
 }
@@ -297,55 +296,30 @@ impl<'a> EventHandler<'a> {
             _ => Ok(Some(Event::new(event))),
         }
     }
-    /// Returns an iterator over ptrace events. This iterator is not a
-    /// fused one: It does NOT guarantee that reaching the end means
-    /// it'll never get another one. This is because non-breakpoint
-    /// events keep the tracee still running which can add more to the
-    /// queue at any time essentially.
+    /// Returns an iterator over ptrace events. This is a blocking stream.
     pub fn iter(&self) -> Result<impl Iterator<Item = Result<Event>>> {
         self.inner.events()
     }
-    /// Tries to wait for a breakpoint event to be reached. To find
-    /// out if a breakpoint event *was* reached, use the `iter`
-    /// function to get events.
-    pub fn retry(&mut self) -> Result<()> {
-        self.inner
-            .file
-            .write(&Flags::FLAG_WAIT.bits().to_ne_bytes())?;
-        Ok(())
-    }
-    /// Handle events by calling a specified callback until breakpoint
-    /// is reached
-    pub fn from_callback<F, E>(mut self, mut callback: F) -> std::result::Result<Event, E>
+    /// Handle non-breakpoint events by calling a specified callback until
+    /// breakpoint is reached
+    pub fn from_callback<F, E>(self, mut callback: F) -> std::result::Result<Event, E>
     where
         F: FnMut(Event) -> std::result::Result<(), E>,
         E: From<io::Error>,
     {
-        'outer: loop {
-            let mut events = self.iter()?;
+        let mut events = self.iter()?;
 
-            while let Some(event) = events.next() {
-                let event = event?;
+        loop {
+            let event = events.next().expect("events should be an infinite stream")?;
 
-                if event.cause & Flags::EVENT_ALL == event.cause {
-                    callback(event)?;
-                } else {
-                    let next = events.next();
-                    assert!(
-                        next.is_none(),
-                        "Breakpoint event wasn't final event. This is possible to handle, but \
-                         usually not what you want."
-                    );
-                    break 'outer Ok(event);
-                }
+            if event.cause & Flags::EVENT_ALL == event.cause {
+                callback(event)?;
+            } else {
+                break Ok(event);
             }
-
-            drop(events);
-
-            self.retry()?;
         }
     }
-    /// Ignore events, just acknowledge them and move on
+    /// Ignore non-blocking events, just acknowledge them and move on
     pub fn ignore(self) -> Result<Event> {
         self.from_callback(|_| Ok(()))
     }
@@ -366,6 +340,7 @@ impl NonblockTracer {
                     .read(true)
                     .write(true)
                     .truncate(true)
+                    .custom_flags(syscall::O_NONBLOCK as i32)
                     .open(format!("proc:{}/trace", pid))?,
                 regs: Registers::attach(pid)?,
                 mem: Memory::attach(pid)?,
