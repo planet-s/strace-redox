@@ -29,10 +29,11 @@ bitflags! {
         const STOP_SIGNAL = syscall::PTRACE_STOP_SIGNAL.bits();
         const STOP_BREAKPOINT = syscall::PTRACE_STOP_BREAKPOINT.bits();
         const STOP_EXIT = syscall::PTRACE_STOP_EXIT.bits();
+        const STOP_EXEC = syscall::PTRACE_STOP_EXEC.bits();
         const STOP_ALL = Self::STOP_PRE_SYSCALL.bits
             | Self::STOP_POST_SYSCALL.bits | Self::STOP_SINGLESTEP.bits
             | Self::STOP_SIGNAL.bits | Self::STOP_BREAKPOINT.bits
-            | Self::STOP_EXIT.bits;
+            | Self::STOP_EXIT.bits | Self::STOP_EXEC.bits;
 
         const EVENT_CLONE = syscall::PTRACE_EVENT_CLONE.bits();
         const EVENT_ALL = Self::EVENT_CLONE.bits;
