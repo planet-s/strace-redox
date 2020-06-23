@@ -13,3 +13,4 @@ redox_syscall = { git = "https://gitlab.redox-os.org/jD91mZM2/syscall.git", bran
 [features]
 default = [ "advanced" ]
 advanced = [ "structopt" ]
+trace = []

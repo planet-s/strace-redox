@@ -17,6 +17,16 @@ mod arch;
 mod f80;
 mod kernel;
 
+macro_rules! trace {
+    ($($inner:expr),*) => {{
+        if cfg!(feature = "trace") {
+            dbg!($($inner),*)
+        } else {
+            ($($inner),*)
+        }
+    }};
+}
+
 fn e<T>(res: syscall::Result<T>) -> Result<T> {
     res.map_err(|err| io::Error::from_raw_os_error(err.errno))
 }
@@ -128,20 +138,20 @@ impl Registers {
     }
     pub fn get_float(&mut self) -> Result<FloatRegisters> {
         let mut regs = syscall::FloatRegisters::default();
-        self.float.read(&mut regs)?;
+        trace!(self.float.read(&mut regs)?, &regs);
         Ok(FloatRegisters(regs))
     }
     pub fn set_float(&mut self, regs: &FloatRegisters) -> Result<()> {
-        self.float.write(&regs)?;
+        trace!(self.float.write(&regs)?, &regs);
         Ok(())
     }
     pub fn get_int(&mut self) -> Result<IntRegisters> {
         let mut regs = syscall::IntRegisters::default();
-        self.int.read(&mut regs)?;
+        trace!(self.int.read(&mut regs)?, &regs);
         Ok(IntRegisters(regs))
     }
     pub fn set_int(&mut self, regs: &IntRegisters) -> Result<()> {
-        self.int.write(&regs)?;
+        trace!(self.int.write(&regs)?, &regs);
         Ok(())
     }
 }
@@ -163,11 +173,13 @@ impl Memory {
     pub fn read(&mut self, from: *const u8, to: &mut [u8]) -> Result<()> {
         self.file.seek(SeekFrom::Start(from as u64))?;
         self.file.read_exact(to)?;
+        trace!(to);
         Ok(())
     }
     pub fn write(&mut self, from: &[u8], to: *const u8) -> Result<()> {
         self.file.seek(SeekFrom::Start(to as u64))?;
         self.file.write_all(from)?;
+        trace!(from);
         Ok(())
     }
     pub fn cursor(&mut self) -> Result<u64> {
@@ -217,7 +229,7 @@ impl Tracer {
     /// breakpoint event, it returns an event handler that lets you
     /// handle events yourself.
     pub fn next_event(&mut self, flags: Flags) -> Result<EventHandler> {
-        self.file.write(&flags.bits().to_ne_bytes())?;
+        trace!(flags, self.file.write(&flags.bits().to_ne_bytes())?);
         Ok(EventHandler { inner: self })
     }
     /// Convert this tracer to be nonblocking. Setting breakpoints
@@ -271,6 +283,7 @@ impl Tracer {
                 i = 0;
             }
             let ret = Event::new(unsafe { ptr::read(buf[i].as_mut_ptr()) });
+            trace!(&ret);
             i += 1;
             Some(Ok(ret))
         }))
@@ -353,7 +366,7 @@ impl NonblockTracer {
     /// breakpoint actually caused this, no waiting for the
     /// breakpoint.
     pub fn next(&mut self, flags: Flags) -> Result<()> {
-        self.file.write(&flags.bits().to_ne_bytes())?;
+        trace!(flags, self.file.write(&flags.bits().to_ne_bytes())?);
         Ok(())
     }
     /// Stub that prevents you from accidentally calling `next_event`
