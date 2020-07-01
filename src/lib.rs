@@ -14,7 +14,6 @@ use std::{
 };
 
 mod arch;
-mod f80;
 mod kernel;
 
 macro_rules! trace {
