@@ -169,17 +169,27 @@ impl Memory {
             file: File::open(format!("proc:{}/mem", pid))?,
         })
     }
-    pub fn read(&mut self, from: *const u8, to: &mut [u8]) -> Result<()> {
-        self.file.seek(SeekFrom::Start(from as u64))?;
-        self.file.read_exact(to)?;
-        trace!(to);
+    pub fn read(&mut self, address: *const u8, memory: &mut [u8]) -> Result<()> {
+        self.file.seek(SeekFrom::Start(address as u64))?;
+        self.file.read_exact(memory)?;
+        trace!(memory);
         Ok(())
     }
-    pub fn write(&mut self, from: &[u8], to: *const u8) -> Result<()> {
-        self.file.seek(SeekFrom::Start(to as u64))?;
-        self.file.write_all(from)?;
-        trace!(from);
+    pub fn write(&mut self, address: *const u8, memory: &[u8]) -> Result<()> {
+        self.file.seek(SeekFrom::Start(address as u64))?;
+        self.file.write_all(memory)?;
+        trace!(memory);
         Ok(())
+    }
+    /// Writes a software breakpoint to the specified memory address, and
+    /// returns the previous instruction.
+    pub fn set_breakpoint(&mut self, address: *const u8) -> Result<u8> {
+        let mut previous = [0];
+        self.read(address, &mut previous)?;
+
+        arch::set_breakpoint(self, address)?;
+
+        Ok(previous[0])
     }
     pub fn cursor(&mut self) -> Result<u64> {
         self.file.seek(SeekFrom::Current(0))
